@@ -49,6 +49,17 @@ const STATUS_COLORS = {
   "Revertida": COLORS.textFaint,
 };
 
+// Categorias de "Prazo de Entrega" — as 3 primeiras contam como no prazo,
+// "Acima de 48 horas" é a única fora do prazo.
+const PRAZO_ORDER = ["Antes de 24 horas", "24 horas", "48 horas", "Acima de 48 horas", "Pendente"];
+const PRAZO_COLORS = {
+  "Antes de 24 horas": COLORS.teal,
+  "24 horas": COLORS.green,
+  "48 horas": COLORS.amber,
+  "Acima de 48 horas": COLORS.red,
+  "Pendente": COLORS.textFaint,
+};
+
 const MONTH_ORDER = { jan: 1, fev: 2, mar: 3, abr: 4, mai: 5, jun: 6, jul: 7, ago: 8, set: 9, out: 10, nov: 11, dez: 12 };
 function monthSortKey(label) {
   if (!label) return -1;
@@ -64,6 +75,11 @@ function fmtMoneyCompact(n) {
   if (Math.abs(v) >= 1_000) return `R$ ${(v / 1_000).toLocaleString("pt-BR", { maximumFractionDigits: 0 })}mil`;
   return fmtMoney(v);
 }
+function fmtWeight(kg) {
+  const v = kg ?? 0;
+  if (Math.abs(v) >= 1000) return `${(v / 1000).toLocaleString("pt-BR", { maximumFractionDigits: 1 })} t`;
+  return `${v.toLocaleString("pt-BR", { maximumFractionDigits: 0 })} kg`;
+}
 function fmtDate(iso) {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -76,13 +92,17 @@ function emptyBucket() {
     total: 0, entregue: 0, pendente: 0, reentrega: 0, devolvida: 0,
     foraPrazo: 0, noPrazo: 0, atencao: 0,
     valorTotal: 0, valorEntregue: 0, valorPendente: 0,
+    peso: 0,
     statusCounts: {},
+    prazoCounts: {},
   };
 }
-function addToBucket(b, situacao, sla, valorVenda) {
+function addToBucket(b, situacao, sla, valorVenda, peso, prazo) {
   b.total += 1;
   b.valorTotal += valorVenda;
+  b.peso += peso;
   b.statusCounts[situacao] = (b.statusCounts[situacao] || 0) + 1;
+  if (prazo) b.prazoCounts[prazo] = (b.prazoCounts[prazo] || 0) + 1;
   if (situacao === "Entrega Realizada") { b.entregue += 1; b.valorEntregue += valorVenda; }
   if (situacao === "Entrega Pendente") { b.pendente += 1; b.valorPendente += valorVenda; }
   if (situacao === "Reentrega") b.reentrega += 1;
@@ -110,13 +130,16 @@ function buildSummary(rows) {
     const transp = (r["Transportadora"] || "Não informado").toString().trim() || "Não informado";
     const diasAberto = Number(r["Dias em Aberto"]) || 0;
     const valorVenda = Number(r["Valor Venda"]) || 0;
+    const peso = Number(r["Peso"]) || 0;
+    const prazo = r["Prazo de Entrega"] || null;
+    const motorista = (r["Nome do Entregador"] || "").toString().trim();
     const dataRotaRaw = r["Data Rota"];
     const dataRotaISO = dataRotaRaw instanceof Date && !isNaN(dataRotaRaw.getTime()) ? dataRotaRaw.toISOString() : null;
 
-    addToBucket(overall, situacao, sla, valorVenda);
+    addToBucket(overall, situacao, sla, valorVenda, peso, prazo);
 
     if (!monthlyStats[mes]) monthlyStats[mes] = emptyBucket();
-    addToBucket(monthlyStats[mes], situacao, sla, valorVenda);
+    addToBucket(monthlyStats[mes], situacao, sla, valorVenda, peso, prazo);
 
     if (!carrierStats[transp]) {
       carrierStats[transp] = {
@@ -155,6 +178,7 @@ function buildSummary(rows) {
         diasAberto,
         cliente: (r["Nome do Cliente"] || "").toString().trim(),
         placa: (r["Placa"] || "").toString().trim() || "Sem placa",
+        motorista: motorista || "Não informado",
       });
     }
   }
@@ -254,14 +278,14 @@ function heatColor(value, max) {
   return `rgb(${r},${g},${b})`;
 }
 
-const CustomTooltip = ({ active, payload, label, money }) => {
+const CustomTooltip = ({ active, payload, label, money, formatter }) => {
   if (!active || !payload || !payload.length) return null;
   return (
     <div style={{ background: "#fff", border: `1px solid ${COLORS.borderLight}`, borderRadius: 8, padding: "8px 12px", fontSize: 12, boxShadow: "0 4px 12px rgba(16,24,40,0.08)" }}>
       <div style={{ color: COLORS.textDim, marginBottom: 4, fontWeight: 600 }}>{label}</div>
       {payload.map((p, i) => (
         <div key={i} style={{ color: p.color || COLORS.text, fontFamily: "ui-monospace, monospace" }}>
-          {p.name}: {money ? fmtMoney(p.value) : fmtInt(p.value)}
+          {p.name}: {formatter ? formatter(p.value) : money ? fmtMoney(p.value) : fmtInt(p.value)}
         </div>
       ))}
     </div>
@@ -334,6 +358,19 @@ function ResumoExecutivo({ summary }) {
     return { mes: m, Total: s.total, Entregues: s.entregue, Pendentes: s.pendente };
   }), [summary]);
 
+  const pesoData = useMemo(() => summary.monthsAsc.map((m) => {
+    const s = summary.monthlyStats[m];
+    return { mes: m, peso: s.peso || 0 };
+  }), [summary]);
+
+  const prazoData = useMemo(() => {
+    return PRAZO_ORDER
+      .filter((p) => (o.prazoCounts || {})[p] > 0)
+      .map((p) => ({ prazo: p, value: o.prazoCounts[p] }));
+  }, [o]);
+  const totalPrazo = prazoData.reduce((a, b) => a + b.value, 0);
+  const noPrazoSum = prazoData.filter((p) => p.prazo !== "Acima de 48 horas" && p.prazo !== "Pendente").reduce((a, b) => a + b.value, 0);
+
   const idx = summary.monthsAsc.length - 1;
   const currentStats = summary.monthlyStats[summary.currentMonth] || emptyBucket();
   const prevStats = idx > 0 ? summary.monthlyStats[summary.monthsAsc[idx - 1]] : null;
@@ -395,6 +432,40 @@ function ResumoExecutivo({ summary }) {
                 {s.name} <span style={{ color: COLORS.textFaint }}>({fmtInt(s.value)})</span>
               </div>
             ))}
+          </div>
+        </Panel>
+      </div>
+
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+        <Panel title="Peso total expedido por mês" subtitle="Soma do peso (kg) de todas as notas por mês da rota" style={{ flex: "1 1 420px" }}>
+          <ResponsiveContainer width="100%" height={220}>
+            <BarChart data={pesoData} margin={{ top: 4, right: 12, left: -4, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} vertical={false} />
+              <XAxis dataKey="mes" tick={{ fill: COLORS.textFaint, fontSize: 11 }} axisLine={{ stroke: COLORS.border }} tickLine={false} />
+              <YAxis tick={{ fill: COLORS.textFaint, fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={(v) => fmtWeight(v)} width={60} />
+              <Tooltip content={<CustomTooltip formatter={(v) => fmtWeight(v)} />} cursor={{ fill: "rgba(255,105,1,0.05)" }} />
+              <Bar dataKey="peso" name="Peso expedido" fill={COLORS.navy} radius={[4, 4, 0, 0]}>
+                <LabelList dataKey="peso" position="top" formatter={(v) => fmtWeight(v)} style={{ fill: COLORS.text, fontSize: 11, fontWeight: 700 }} />
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </Panel>
+
+        <Panel title="Prazo de entrega" subtitle={`${fmtPct(totalPrazo ? (noPrazoSum / totalPrazo) * 100 : 0)} das notas em até 48h (no prazo)`} style={{ flex: "1 1 380px" }}>
+          <ResponsiveContainer width="100%" height={220}>
+            <BarChart data={prazoData} layout="vertical" margin={{ top: 4, right: 30, left: 10, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} horizontal={false} />
+              <XAxis type="number" tick={{ fill: COLORS.textFaint, fontSize: 11 }} axisLine={false} tickLine={false} />
+              <YAxis type="category" dataKey="prazo" tick={{ fill: COLORS.textDim, fontSize: 11.5 }} axisLine={false} tickLine={false} width={110} />
+              <Tooltip content={<CustomTooltip />} cursor={{ fill: "rgba(255,105,1,0.05)" }} />
+              <Bar dataKey="value" radius={[0, 4, 4, 0]}>
+                {prazoData.map((entry, i) => (<Cell key={i} fill={PRAZO_COLORS[entry.prazo] || COLORS.textFaint} />))}
+                <LabelList dataKey="value" position="right" style={{ fill: COLORS.text, fontSize: 11.5, fontWeight: 700 }} />
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+          <div style={{ fontSize: 11, color: COLORS.textFaint, textAlign: "center" }}>
+            "Antes de 24h", "24 horas" e "48 horas" contam como no prazo — só "Acima de 48 horas" é considerado fora do prazo
           </div>
         </Panel>
       </div>
@@ -581,6 +652,17 @@ function CarrierMonthView({ summary }) {
 /* ------------------------------------------------------------------ */
 /*  Detalhamento por placa — transportadora selecionada > placa > NFs  */
 /* ------------------------------------------------------------------ */
+function mostCommonName(names) {
+  const counts = {};
+  let best = "Não informado", bestCount = 0;
+  for (const n of names) {
+    const key = n || "Não informado";
+    counts[key] = (counts[key] || 0) + 1;
+    if (counts[key] > bestCount) { bestCount = counts[key]; best = key; }
+  }
+  return best;
+}
+
 function PlacaBreakdown({ summary, carrier }) {
   const [openPlaca, setOpenPlaca] = useState(null);
 
@@ -594,6 +676,7 @@ function PlacaBreakdown({ summary, carrier }) {
     return Object.entries(byPlaca)
       .map(([placa, notes]) => ({
         placa,
+        motorista: mostCommonName(notes.map((n) => n.motorista)),
         notes: notes.sort((a, b) => b.diasAberto - a.diasAberto),
         total: notes.length,
       }))
@@ -616,6 +699,7 @@ function PlacaBreakdown({ summary, carrier }) {
     const placaRows = groups.map((g) => `
       <tr>
         <td style="padding:6px 10px;border-bottom:1px solid ${COLORS.border};font-family:ui-monospace,monospace;">${g.placa}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid ${COLORS.border};">${g.motorista}</td>
         <td style="padding:6px 10px;border-bottom:1px solid ${COLORS.border};text-align:center;font-weight:700;color:${COLORS.orange};">${g.total}</td>
       </tr>`).join("");
 
@@ -625,12 +709,12 @@ function PlacaBreakdown({ summary, carrier }) {
           <td style="padding:6px 10px;border-bottom:1px solid ${COLORS.border};font-family:ui-monospace,monospace;">${n.nf}</td>
           <td style="padding:6px 10px;border-bottom:1px solid ${COLORS.border};">${fmtDate(n.dataRota)}</td>
           <td style="padding:6px 10px;border-bottom:1px solid ${COLORS.border};">${n.mesRota}</td>
-          <td style="padding:6px 10px;border-bottom:1px solid ${COLORS.border};font-weight:700;color:${n.diasAberto > 60 ? COLORS.red : n.diasAberto > 30 ? COLORS.amber : COLORS.teal};">${n.diasAberto}d</td>
+          <td style="padding:6px 10px;border-bottom:1px solid ${COLORS.border};font-weight:700;color:${n.diasAberto >= 1 ? COLORS.red : COLORS.teal};">${n.diasAberto}d</td>
           <td style="padding:6px 10px;border-bottom:1px solid ${COLORS.border};">${(n.cliente || "").replace(/</g, "&lt;")}</td>
         </tr>`).join("");
       return `
         <div class="page">
-          <h2 style="font-size:15px;margin-bottom:10px;">Placa ${g.placa} — ${g.total} nota${g.total > 1 ? "s" : ""} pendente${g.total > 1 ? "s" : ""}</h2>
+          <h2 style="font-size:15px;margin-bottom:10px;">Placa ${g.placa} — ${g.motorista} — ${g.total} nota${g.total > 1 ? "s" : ""} pendente${g.total > 1 ? "s" : ""}</h2>
           <table style="width:100%;border-collapse:collapse;font-size:12px;">
             <thead><tr>
               <th style="text-align:left;padding:6px 10px;border-bottom:1px solid ${COLORS.border};color:${COLORS.textDim};">NF</th>
@@ -703,6 +787,7 @@ function PlacaBreakdown({ summary, carrier }) {
     <table style="width:100%;border-collapse:collapse;font-size:12.5px;">
       <thead><tr>
         <th style="text-align:left;padding:7px 10px;border-bottom:1px solid ${COLORS.border};color:${COLORS.textDim};">Placa</th>
+        <th style="text-align:left;padding:7px 10px;border-bottom:1px solid ${COLORS.border};color:${COLORS.textDim};">Motorista</th>
         <th style="text-align:center;padding:7px 10px;border-bottom:1px solid ${COLORS.border};color:${COLORS.textDim};">Notas pendentes</th>
       </tr></thead>
       <tbody>${placaRows}</tbody>
@@ -732,13 +817,14 @@ function PlacaBreakdown({ summary, carrier }) {
       const rows = g.notes.map((n) => ({
         "Nota Fiscal": n.nf,
         "Placa": g.placa,
+        "Motorista": g.motorista,
         "Data da Rota": fmtDate(n.dataRota),
         "Mês da Rota": n.mesRota,
         "Dias em Aberto": n.diasAberto,
         "Cliente": n.cliente,
       }));
       const ws = XLSX.utils.json_to_sheet(rows);
-      ws["!cols"] = [{ wch: 12 }, { wch: 12 }, { wch: 13 }, { wch: 12 }, { wch: 14 }, { wch: 38 }];
+      ws["!cols"] = [{ wch: 12 }, { wch: 12 }, { wch: 24 }, { wch: 13 }, { wch: 12 }, { wch: 14 }, { wch: 38 }];
 
       // Nomes de aba no Excel: máx. 31 caracteres, sem \ / ? * [ ] : , e não podem repetir.
       let base = (g.placa || "SEM PLACA").replace(/[\\/?*\[\]:]/g, "-").trim().slice(0, 31) || "SEM PLACA";
@@ -810,6 +896,7 @@ function PlacaBreakdown({ summary, carrier }) {
               >
                 <span style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, color: COLORS.text, fontFamily: "ui-monospace, monospace" }}>
                   {isOpen ? "▾" : "▸"} {g.placa}
+                  <span style={{ fontWeight: 500, color: COLORS.textDim, fontFamily: "-apple-system, sans-serif", fontSize: 12 }}>· {g.motorista}</span>
                 </span>
                 <span style={{ fontSize: 12, fontWeight: 700, color: COLORS.orange, background: "#fff", padding: "3px 10px", borderRadius: 20, border: `1px solid ${COLORS.orange}` }}>
                   {fmtInt(g.total)} nota{g.total > 1 ? "s" : ""} pendente{g.total > 1 ? "s" : ""}
@@ -831,7 +918,7 @@ function PlacaBreakdown({ summary, carrier }) {
                           <td style={{ padding: "7px 12px", borderBottom: `1px solid ${COLORS.border}`, fontFamily: "ui-monospace, monospace", color: COLORS.textDim }}>{n.nf}</td>
                           <td style={{ padding: "7px 12px", borderBottom: `1px solid ${COLORS.border}`, color: COLORS.text }}>{fmtDate(n.dataRota)}</td>
                           <td style={{ padding: "7px 12px", borderBottom: `1px solid ${COLORS.border}`, color: COLORS.textDim }}>{n.mesRota}</td>
-                          <td style={{ padding: "7px 12px", borderBottom: `1px solid ${COLORS.border}`, fontFamily: "ui-monospace, monospace", fontWeight: 700, color: n.diasAberto > 60 ? COLORS.red : n.diasAberto > 30 ? COLORS.amber : COLORS.teal }}>{n.diasAberto}d</td>
+                          <td style={{ padding: "7px 12px", borderBottom: `1px solid ${COLORS.border}`, fontFamily: "ui-monospace, monospace", fontWeight: 700, color: n.diasAberto >= 1 ? COLORS.red : COLORS.teal }}>{n.diasAberto}d</td>
                           <td style={{ padding: "7px 12px", borderBottom: `1px solid ${COLORS.border}`, color: COLORS.textDim, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{n.cliente}</td>
                         </tr>
                       ))}
