@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { useParams } from "react-router-dom";
+import {
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LabelList
+} from "recharts";
 import { TruckIcon, PackageX, Clock, Loader2, Info, ShieldCheck } from "lucide-react";
 import { storage } from "../lib/storage";
 import { findCarrierBySlug } from "../lib/slug";
@@ -24,10 +27,31 @@ function fmtDate(iso) {
   return d.toLocaleDateString("pt-BR");
 }
 function urgencyStyle(dias) {
-  if (dias > 60) return { bg: "#fee2e2", border: COLORS.red, color: COLORS.red, label: "Crítico" };
-  if (dias > 30) return { bg: "#fef3c7", border: COLORS.amber, color: COLORS.amber, label: "Atenção" };
-  return { bg: "#e6f9f6", border: COLORS.teal, color: COLORS.teal, label: "Recente" };
+  if (dias >= 1) return { bg: "#fee2e2", border: COLORS.red, color: COLORS.red, label: "Crítico" };
+  return { bg: "#e6f9f6", border: COLORS.teal, color: COLORS.teal, label: "No prazo" };
 }
+function mostCommonName(names) {
+  const counts = {};
+  let best = "Não informado", bestCount = 0;
+  for (const n of names) {
+    const key = n || "Não informado";
+    counts[key] = (counts[key] || 0) + 1;
+    if (counts[key] > bestCount) { bestCount = counts[key]; best = key; }
+  }
+  return best;
+}
+
+const CustomTooltip = ({ active, payload, label }) => {
+  if (!active || !payload || !payload.length) return null;
+  return (
+    <div style={{ background: "#fff", border: `1px solid ${COLORS.borderLight}`, borderRadius: 8, padding: "8px 12px", fontSize: 12, boxShadow: "0 4px 12px rgba(16,24,40,0.08)" }}>
+      <div style={{ color: COLORS.textDim, marginBottom: 4, fontWeight: 600 }}>{label}</div>
+      {payload.map((p, i) => (
+        <div key={i} style={{ color: p.color || COLORS.text, fontFamily: "ui-monospace, monospace" }}>{p.name}: {fmtInt(p.value)}</div>
+      ))}
+    </div>
+  );
+};
 
 function KpiCard({ icon: Icon, label, value, sub, accent }) {
   return (
@@ -44,6 +68,117 @@ function KpiCard({ icon: Icon, label, value, sub, accent }) {
       <div style={{ fontSize: 26, fontWeight: 700, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace", color: COLORS.text, letterSpacing: "-0.02em" }}>{value}</div>
       {sub && <div style={{ fontSize: 12, color: COLORS.textFaint }}>{sub}</div>}
     </div>
+  );
+}
+
+function Panel({ title, subtitle, children, style }) {
+  return (
+    <div style={{
+      background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 10,
+      padding: 18, display: "flex", flexDirection: "column", gap: 12, minWidth: 0,
+      boxShadow: "0 1px 2px rgba(16,24,40,0.04)", ...style,
+    }}>
+      <div>
+        <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.text }}>{title}</div>
+        {subtitle && <div style={{ fontSize: 11.5, color: COLORS.textFaint, marginTop: 2 }}>{subtitle}</div>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Visão por placa — placa, motorista e notas pendentes agrupadas     */
+/* ------------------------------------------------------------------ */
+function PlacaTables({ notes }) {
+  const [openPlaca, setOpenPlaca] = useState(null);
+
+  const groups = useMemo(() => {
+    const byPlaca = {};
+    for (const n of notes) {
+      if (!byPlaca[n.placa]) byPlaca[n.placa] = [];
+      byPlaca[n.placa].push(n);
+    }
+    return Object.entries(byPlaca)
+      .map(([placa, list]) => ({
+        placa,
+        motorista: mostCommonName(list.map((n) => n.motorista)),
+        notes: list.sort((a, b) => b.diasAberto - a.diasAberto),
+        total: list.length,
+      }))
+      .sort((a, b) => b.total - a.total);
+  }, [notes]);
+
+  useEffect(() => { setOpenPlaca(groups[0]?.placa ?? null); }, [notes.length]); // eslint-disable-line
+
+  if (groups.length === 0) {
+    return (
+      <Panel title="Notas pendentes por placa">
+        <div style={{ padding: "16px 10px", color: COLORS.textFaint, textAlign: "center", fontSize: 12.5 }}>
+          Nenhuma nota pendente — tudo regularizado.
+        </div>
+      </Panel>
+    );
+  }
+
+  return (
+    <Panel title="Notas pendentes por placa" subtitle="Clique em uma placa para ver as notas — priorize as marcadas como &quot;Crítico&quot;">
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {groups.map((g) => {
+          const isOpen = openPlaca === g.placa;
+          return (
+            <div key={g.placa} style={{ border: `1px solid ${COLORS.border}`, borderRadius: 8, overflow: "hidden" }}>
+              <button
+                onClick={() => setOpenPlaca(isOpen ? null : g.placa)}
+                style={{
+                  width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between",
+                  padding: "10px 14px", background: isOpen ? COLORS.orangeSoft : COLORS.panelAlt, border: "none",
+                  cursor: "pointer", fontSize: 13,
+                }}
+              >
+                <span style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, color: COLORS.text, fontFamily: "ui-monospace, monospace" }}>
+                  {isOpen ? "▾" : "▸"} {g.placa}
+                  <span style={{ fontWeight: 500, color: COLORS.textDim, fontFamily: "-apple-system, sans-serif", fontSize: 12 }}>· {g.motorista}</span>
+                </span>
+                <span style={{ fontSize: 12, fontWeight: 700, color: COLORS.orange, background: "#fff", padding: "3px 10px", borderRadius: 20, border: `1px solid ${COLORS.orange}` }}>
+                  {fmtInt(g.total)} nota{g.total > 1 ? "s" : ""} pendente{g.total > 1 ? "s" : ""}
+                </span>
+              </button>
+              {isOpen && (
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+                    <thead>
+                      <tr>
+                        {["NF", "Data da rota", "Mês da rota", "Dias em aberto", "Cliente", "Prioridade"].map((h) => (
+                          <th key={h} style={{ textAlign: "left", padding: "7px 12px", color: COLORS.textDim, fontWeight: 600, borderBottom: `1px solid ${COLORS.border}`, background: COLORS.panel }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {g.notes.map((n, i) => {
+                        const u = urgencyStyle(n.diasAberto);
+                        return (
+                          <tr key={i} style={{ background: n.diasAberto >= 1 ? "#fef7f7" : "transparent" }}>
+                            <td style={{ padding: "7px 12px", borderBottom: `1px solid ${COLORS.border}`, fontFamily: "ui-monospace, monospace", color: COLORS.textDim }}>{n.nf}</td>
+                            <td style={{ padding: "7px 12px", borderBottom: `1px solid ${COLORS.border}`, color: COLORS.text }}>{fmtDate(n.dataRota)}</td>
+                            <td style={{ padding: "7px 12px", borderBottom: `1px solid ${COLORS.border}`, color: COLORS.textDim }}>{n.mesRota}</td>
+                            <td style={{ padding: "7px 12px", borderBottom: `1px solid ${COLORS.border}`, fontFamily: "ui-monospace, monospace", fontWeight: 700, color: u.color }}>{n.diasAberto}d</td>
+                            <td style={{ padding: "7px 12px", borderBottom: `1px solid ${COLORS.border}`, color: COLORS.textDim, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{n.cliente}</td>
+                            <td style={{ padding: "7px 12px", borderBottom: `1px solid ${COLORS.border}` }}>
+                              <span style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "3px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700, background: u.bg, color: u.color, border: `1px solid ${u.border}` }}>{u.label}</span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </Panel>
   );
 }
 
@@ -82,6 +217,12 @@ export default function PartnerDashboard() {
       .filter((p) => p.transportadora === carrierName)
       .sort((a, b) => b.diasAberto - a.diasAberto);
     return { stats, slaPct, pctPendente, notes };
+  }, [summary, carrierName]);
+
+  const monthChartData = useMemo(() => {
+    if (!summary || !carrierName) return [];
+    const data = (summary.carrierMonthPending || {})[carrierName] || {};
+    return (summary.monthsAsc || []).map((m) => ({ mes: m, pendentes: data[m] || 0 }));
   }, [summary, carrierName]);
 
   const lastUpdated = summary?.generatedAt ? new Date(summary.generatedAt).toLocaleDateString("pt-BR") : null;
@@ -147,50 +288,21 @@ export default function PartnerDashboard() {
               <KpiCard icon={Clock} label="SLA no prazo" accent={COLORS.teal} value={fmtPct(carrierData.slaPct)} sub={`${fmtInt(carrierData.stats.foraPrazo)} fora do prazo`} />
             </div>
 
-            <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 10, padding: 18, boxShadow: "0 1px 2px rgba(16,24,40,0.04)" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
-                <div>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.text }}>Notas pendentes de regularização</div>
-                  <div style={{ fontSize: 11.5, color: COLORS.textFaint, marginTop: 2 }}>Ordenadas pelas mais antigas — priorize as marcadas como "Crítico"</div>
-                </div>
-                <span style={{ fontSize: 12, fontWeight: 700, color: COLORS.orange, background: COLORS.orangeSoft, padding: "5px 12px", borderRadius: 20 }}>
-                  {fmtInt(carrierData.notes.length)} pendentes
-                </span>
-              </div>
+            <Panel title="Pendências por mês" subtitle="Situação de todos os meses carregados">
+              <ResponsiveContainer width="100%" height={220}>
+                <BarChart data={monthChartData} margin={{ top: 4, right: 8, left: -14, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} vertical={false} />
+                  <XAxis dataKey="mes" tick={{ fill: COLORS.textFaint, fontSize: 11 }} axisLine={{ stroke: COLORS.border }} tickLine={false} />
+                  <YAxis tick={{ fill: COLORS.textFaint, fontSize: 11 }} axisLine={false} tickLine={false} />
+                  <Tooltip content={<CustomTooltip />} cursor={{ fill: "rgba(255,105,1,0.05)" }} />
+                  <Bar dataKey="pendentes" name="Pendentes" fill={COLORS.orange} radius={[4, 4, 0, 0]}>
+                    <LabelList dataKey="pendentes" position="top" style={{ fill: COLORS.text, fontSize: 11.5, fontWeight: 700 }} />
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </Panel>
 
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5, minWidth: 560 }}>
-                  <thead>
-                    <tr>
-                      {["NF", "Placa", "Data da rota", "Mês da rota", "Dias em aberto", "Cliente", "Prioridade"].map((h) => (
-                        <th key={h} style={{ textAlign: "left", padding: "8px 10px", color: COLORS.textDim, fontWeight: 600, borderBottom: `1px solid ${COLORS.border}` }}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {carrierData.notes.length === 0 && (
-                      <tr><td colSpan={7} style={{ padding: "24px 10px", color: COLORS.textFaint, textAlign: "center" }}>Nenhuma nota pendente — tudo regularizado.</td></tr>
-                    )}
-                    {carrierData.notes.map((n, i) => {
-                      const u = urgencyStyle(n.diasAberto);
-                      return (
-                        <tr key={i} style={{ background: n.diasAberto > 60 ? "#fef7f7" : "transparent" }}>
-                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLORS.border}`, fontFamily: "ui-monospace, monospace", color: COLORS.textDim }}>{n.nf}</td>
-                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLORS.border}`, fontFamily: "ui-monospace, monospace", color: COLORS.textDim }}>{n.placa || "—"}</td>
-                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLORS.border}`, color: COLORS.text }}>{fmtDate(n.dataRota)}</td>
-                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLORS.border}`, color: COLORS.textDim }}>{n.mesRota}</td>
-                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLORS.border}`, fontFamily: "ui-monospace, monospace", fontWeight: 700, color: u.color }}>{n.diasAberto}d</td>
-                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLORS.border}`, color: COLORS.textDim, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{n.cliente}</td>
-                          <td style={{ padding: "8px 10px", borderBottom: `1px solid ${COLORS.border}` }}>
-                            <span style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "3px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700, background: u.bg, color: u.color, border: `1px solid ${u.border}` }}>{u.label}</span>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+            <PlacaTables notes={carrierData.notes} />
 
             <div style={{ fontSize: 11, color: COLORS.textFaint, textAlign: "center" }}>
               Este painel mostra apenas os dados de {carrierName}. Em caso de dúvidas sobre alguma nota, entre em contato com o time de indenizações.
