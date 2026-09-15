@@ -80,6 +80,12 @@ function fmtWeight(kg) {
   if (Math.abs(v) >= 1000) return `${(v / 1000).toLocaleString("pt-BR", { maximumFractionDigits: 1 })} t`;
   return `${v.toLocaleString("pt-BR", { maximumFractionDigits: 0 })} kg`;
 }
+function normalizePlaca(p) {
+  return (p || "").toString().trim().toUpperCase().replace(/\s+/g, "");
+}
+function normalizeSheetName(n) {
+  return (n || "").toString().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
+}
 function fmtDate(iso) {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -115,7 +121,7 @@ function addToBucket(b, situacao, sla, valorVenda, peso, prazo) {
 /* ------------------------------------------------------------------ */
 /*  Aggregation — schema compartilhado com o painel do parceiro        */
 /* ------------------------------------------------------------------ */
-function buildSummary(rows) {
+function buildSummary(rows, placaMotoristaMap) {
   const overall = emptyBucket();
   const monthlyStats = {};
   const carrierStats = {};
@@ -132,7 +138,9 @@ function buildSummary(rows) {
     const valorVenda = Number(r["Valor Venda"]) || 0;
     const peso = Number(r["Peso"]) || 0;
     const prazo = r["Prazo de Entrega"] || null;
-    const motorista = (r["Nome do Entregador"] || "").toString().trim();
+    const placaKeyLookup = normalizePlaca(r["Placa"]);
+    const motoristaVeiculo = placaMotoristaMap ? placaMotoristaMap[placaKeyLookup] : null;
+    const motorista = motoristaVeiculo || "Não informado";
     const dataRotaRaw = r["Data Rota"];
     const dataRotaISO = dataRotaRaw instanceof Date && !isNaN(dataRotaRaw.getTime()) ? dataRotaRaw.toISOString() : null;
 
@@ -1339,15 +1347,34 @@ export default function LogisticsDashboardGerencial() {
         );
       }
 
+      // Aba "Veículos" — usada para cruzar Placa -> Motorista (fonte mais confiável
+      // do que a coluna "Nome do Entregador" da aba de notas). Opcional: se não
+      // existir, segue sem ela.
+      const veiculosName = (namesOnly.SheetNames || []).find(
+        (n) => normalizeSheetName(n) === "veiculos"
+      );
+
       setStatus("Processando planilha (Status Atual)...");
-      const wb = XLSX.read(buf, { type: "array", sheets: [targetName], cellDates: true });
+      const sheetsToRead = veiculosName ? [targetName, veiculosName] : [targetName];
+      const wb = XLSX.read(buf, { type: "array", sheets: sheetsToRead, cellDates: true });
       const ws = wb.Sheets[targetName];
       if (!ws) throw new Error('Não foi possível ler a aba "Status Atual".');
       const rows = XLSX.utils.sheet_to_json(ws, { defval: null });
       if (!rows.length) throw new Error("Nenhum dado encontrado na aba Status Atual.");
 
+      let placaMotoristaMap = null;
+      if (veiculosName && wb.Sheets[veiculosName]) {
+        const veiculoRows = XLSX.utils.sheet_to_json(wb.Sheets[veiculosName], { defval: null });
+        placaMotoristaMap = {};
+        for (const v of veiculoRows) {
+          const placaKey = normalizePlaca(v["Placa"]);
+          const motoristaNome = (v["Motorista"] || "").toString().trim();
+          if (placaKey && motoristaNome) placaMotoristaMap[placaKey] = motoristaNome;
+        }
+      }
+
       setStatus("Calculando indicadores...");
-      const newSummary = buildSummary(rows);
+      const newSummary = buildSummary(rows, placaMotoristaMap);
 
       setStatus("Salvando (alimenta também o painel do parceiro)...");
       const saveResult = await storage.set(STORAGE_KEY, JSON.stringify(newSummary));
