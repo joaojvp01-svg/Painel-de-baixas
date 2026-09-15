@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { useParams } from "react-router-dom";
+import * as XLSX from "xlsx";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LabelList
 } from "recharts";
-import { TruckIcon, PackageX, Clock, Loader2, Info, ShieldCheck } from "lucide-react";
+import { TruckIcon, PackageX, Clock, Loader2, Info, ShieldCheck, Download } from "lucide-react";
 import { storage } from "../lib/storage";
 import { findCarrierBySlug } from "../lib/slug";
 
@@ -71,16 +72,19 @@ function KpiCard({ icon: Icon, label, value, sub, accent }) {
   );
 }
 
-function Panel({ title, subtitle, children, style }) {
+function Panel({ title, subtitle, children, style, right }) {
   return (
     <div style={{
       background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 10,
       padding: 18, display: "flex", flexDirection: "column", gap: 12, minWidth: 0,
       boxShadow: "0 1px 2px rgba(16,24,40,0.04)", ...style,
     }}>
-      <div>
-        <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.text }}>{title}</div>
-        {subtitle && <div style={{ fontSize: 11.5, color: COLORS.textFaint, marginTop: 2 }}>{subtitle}</div>}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, flexWrap: "wrap" }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.text }}>{title}</div>
+          {subtitle && <div style={{ fontSize: 11.5, color: COLORS.textFaint, marginTop: 2 }}>{subtitle}</div>}
+        </div>
+        {right}
       </div>
       {children}
     </div>
@@ -90,7 +94,7 @@ function Panel({ title, subtitle, children, style }) {
 /* ------------------------------------------------------------------ */
 /*  Visão por placa — placa, motorista e notas pendentes agrupadas     */
 /* ------------------------------------------------------------------ */
-function PlacaTables({ notes }) {
+function PlacaTables({ notes, carrierName }) {
   const [openPlaca, setOpenPlaca] = useState(null);
 
   const groups = useMemo(() => {
@@ -111,6 +115,42 @@ function PlacaTables({ notes }) {
 
   useEffect(() => { setOpenPlaca(groups[0]?.placa ?? null); }, [notes.length]); // eslint-disable-line
 
+  const handleExport = () => {
+    if (!groups.length) return;
+    const wb = XLSX.utils.book_new();
+    const usedNames = new Set();
+
+    groups.forEach((g) => {
+      const rows = g.notes.map((n) => ({
+        "Nota Fiscal": n.nf,
+        "Placa": g.placa,
+        "Motorista": g.motorista,
+        "Data da Rota": fmtDate(n.dataRota),
+        "Mês da Rota": n.mesRota,
+        "Dias em Aberto": n.diasAberto,
+        "Cliente": n.cliente,
+      }));
+      const ws = XLSX.utils.json_to_sheet(rows);
+      ws["!cols"] = [{ wch: 12 }, { wch: 12 }, { wch: 24 }, { wch: 13 }, { wch: 12 }, { wch: 14 }, { wch: 38 }];
+
+      // Nomes de aba no Excel: máx. 31 caracteres, sem \ / ? * [ ] : e não podem repetir.
+      let base = (g.placa || "SEM PLACA").replace(/[\\/?*[\]:]/g, "-").trim().slice(0, 31) || "SEM PLACA";
+      let name = base;
+      let suffix = 1;
+      while (usedNames.has(name)) {
+        suffix += 1;
+        const tail = ` (${suffix})`;
+        name = base.slice(0, 31 - tail.length) + tail;
+      }
+      usedNames.add(name);
+      XLSX.utils.book_append_sheet(wb, ws, name);
+    });
+
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const carrierSlug = (carrierName || "transportadora").replace(/[^a-zA-Z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 50);
+    XLSX.writeFile(wb, `Pendencias_${carrierSlug}_${dateStr}.xlsx`);
+  };
+
   if (groups.length === 0) {
     return (
       <Panel title="Notas pendentes por placa">
@@ -122,7 +162,21 @@ function PlacaTables({ notes }) {
   }
 
   return (
-    <Panel title="Notas pendentes por placa" subtitle="Clique em uma placa para ver as notas — priorize as marcadas como &quot;Crítico&quot;">
+    <Panel
+      title="Notas pendentes por placa"
+      subtitle="Clique em uma placa para ver as notas — priorize as marcadas como &quot;Crítico&quot;"
+      right={
+        <button
+          onClick={handleExport}
+          style={{
+            display: "flex", alignItems: "center", gap: 7, background: COLORS.orange, color: "#fff",
+            border: "none", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+          }}
+        >
+          <Download size={14} /> Exportar Excel
+        </button>
+      }
+    >
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {groups.map((g) => {
           const isOpen = openPlaca === g.placa;
@@ -302,7 +356,7 @@ export default function PartnerDashboard() {
               </ResponsiveContainer>
             </Panel>
 
-            <PlacaTables notes={carrierData.notes} />
+            <PlacaTables notes={carrierData.notes} carrierName={carrierName} />
 
             <div style={{ fontSize: 11, color: COLORS.textFaint, textAlign: "center" }}>
               Este painel mostra apenas os dados de {carrierName}. Em caso de dúvidas sobre alguma nota, entre em contato com o time de indenizações.
